@@ -458,15 +458,11 @@ export class Workbook {
   // ---- transactions / undo ----
   transact(label, fn) {
     if (this._tx) return fn(); // nested: join
-    this._tx = { label, inverses: [], cells: new Map(), touched: false };
+    this._tx = { label, inverses: [], cellKeys: new Set(), touched: false };
     let result, error;
     try { result = fn(); } catch (e) { error = e; }
     const tx = this._tx; this._tx = null;
     const inverses = tx.inverses;
-    if (tx.cells.size) {
-      const snapshot = [...tx.cells.entries()];
-      inverses.push(() => { for (const [k, { sheet, old }] of snapshot) { const [r, c] = unkey(k.slice(k.indexOf('!') + 1)); sheet._setCellRaw(r, c, old); } });
-    }
     if (this._needsRebuild) { this._needsRebuild = false; this.engine.rebuildAll(); } else this.engine.recalc();
     if (inverses.length) {
       if (!tx.isUndo && !tx.isRedo) { this.undoStack.push({ label, inverses }); if (this.undoStack.length > this.maxUndo) this.undoStack.shift(); this.redoStack.length = 0; }
@@ -477,18 +473,25 @@ export class Workbook {
     return result;
   }
   _record(inverse) { if (this._tx) this._tx.inverses.push(inverse); }
+  // Cell changes are recorded in sequence with structural inverses so that undo restores each cell
+  // at the position it had when it was changed. Within a run of plain edits only the first change per cell is kept.
   _recordCell(sheet, k, old) {
     if (!this._tx) return;
     const kk = `${sheet.id}!${k}`;
-    if (!this._tx.cells.has(kk)) this._tx.cells.set(kk, { sheet, old: old ? { ...old } : null });
+    if (this._tx.cellKeys.has(kk)) return;
+    this._tx.cellKeys.add(kk);
+    const snap = old ? { ...old } : null;
+    const [r, c] = unkey(k);
+    this._tx.inverses.push(() => sheet._setCellRaw(r, c, snap));
   }
+  // A structural change moves cells, so later cell edits must get fresh inverse entries.
+  _structuralBoundary() { if (this._tx) this._tx.cellKeys = new Set(); }
   _touch() { if (this._tx) this._tx.touched = true; }
   _runInverse(entry, isUndo) {
-    this._tx = { label: entry.label, inverses: [], cells: new Map(), touched: false, isUndo, isRedo: !isUndo };
+    this._tx = { label: entry.label, inverses: [], cellKeys: new Set(), touched: false, isUndo, isRedo: !isUndo };
     try { for (let i = entry.inverses.length - 1; i >= 0; i--) entry.inverses[i](); } finally {
       const tx = this._tx; this._tx = null;
       const inverses = tx.inverses;
-      if (tx.cells.size) { const snapshot = [...tx.cells.entries()]; inverses.push(() => { for (const [k, { sheet, old }] of snapshot) { const [r, c] = unkey(k.slice(k.indexOf('!') + 1)); sheet._setCellRaw(r, c, old); } }); }
       if (this._needsRebuild) { this._needsRebuild = false; this.engine.rebuildAll(); } else this.engine.recalc();
       (isUndo ? this.redoStack : this.undoStack).push({ label: entry.label, inverses });
       this.dirty = true;
@@ -505,6 +508,7 @@ export class Workbook {
     if (!count) return;
     const isRow = axis === 'row';
     const max = isRow ? MAX_ROWS : MAX_COLS;
+    let inverse;
     if (count < 0) {
       // snapshot deleted cells
       const removed = [];
@@ -517,7 +521,7 @@ export class Workbook {
       // collect formulas that will change so the inverse can restore them exactly
       const formulaBackup = [];
       for (const sh of this.sheets) for (const [k, cell] of sh.cells) if (cell.f) formulaBackup.push({ sh, k, f: cell.f });
-      this._record(() => {
+      inverse = () => {
         this._structural(sheet, axis, index, -count);
         for (const { i, size, hidden, style } of removedSizes) { if (size != null) ax.sizes.set(i, size); if (hidden) ax.hidden.add(i); if (style) (isRow ? sheet.rowStyles : sheet.colStyles).set(i, style); }
         ax.invalidate();
@@ -526,13 +530,15 @@ export class Workbook {
         sheet.merges = oldMerges; sheet.cf = oldCf; sheet.validations = oldVal; sheet.charts = oldCharts; sheet.filter = oldFilter; sheet.freeze = oldFreeze;
         this.names = new Map(oldNames.map(([k, v]) => [k, { ...v }]));
         sheet.applyFilter(); this._needsRebuild = true; this._touch();
-      });
+      };
     } else {
-      this._record(() => this._structural(sheet, axis, index, -count));
+      inverse = () => this._structural(sheet, axis, index, -count);
     }
-    // 1. rewrite formulas everywhere
+    // 1. rewrite formulas everywhere (recorded as ordinary cell changes at their pre-shift positions)
     for (const sh of this.sheets) sh._rewriteFormulas((f) => adjustFormulaForInsertDelete(f, sh.name, sheet.name, axis, index, count));
     for (const [k, n] of this.names) { const nr = adjustFormulaForInsertDelete(n.ref, sheet.name, sheet.name, axis, index, count); if (nr !== n.ref) { n.ref = nr; n.ast = null; } }
+    // the structural inverse runs before those cell restores during undo, so positions line up first
+    this._record(inverse); this._structuralBoundary();
     // 2. move cells
     const moved = [];
     for (const [k, cell] of sheet.cells) {

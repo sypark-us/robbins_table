@@ -1,0 +1,279 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>OfficeTable smoke test</title><base href="../">
+<link rel="stylesheet" href="css/style.css">
+<style>#out{position:fixed;top:0;left:0;right:0;z-index:999;background:#fff;color:#000;font-family:monospace;white-space:pre-wrap;font-size:12px;max-height:45vh;overflow:auto;border-bottom:2px solid #c00;padding:4px}</style>
+</head>
+<body>
+<div id="out">running…</div>
+<script type="module">
+const out = document.getElementById('out');
+const lines = []; let errors = 0;
+const log = (s) => { lines.push(s); };
+const pass = (name) => { log(`PASS ${name}`); console.log(`PASS ${name}`); };
+const fail = (name, e) => { errors++; log(`FAIL ${name}: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}`); console.log(`FAIL ${name}`, e); };
+const test = async (name, fn) => { try { await fn(); pass(name); } catch (e) { fail(name, e); } };
+const assert = (c, msg) => { if (!c) throw new Error(msg || 'assertion failed'); };
+const eq = (a, b, msg) => { if (a !== b) throw new Error(`${msg || ''} expected ${JSON.stringify(b)} got ${JSON.stringify(a)}`); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+const indexHtml = await (await fetch('index.html')).text();
+const bodyHtml = indexHtml.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script[\s\S]*?<\/script>/g, '');
+document.body.insertAdjacentHTML('beforeend', bodyHtml);
+localStorage.removeItem('officetable.autosave');
+await import('./js/app.js');
+const A = window.officeTable;
+for (let i = 0; i < 100 && !A.grid; i++) await sleep(50);
+const S = () => A.sheet;
+const ref = (a1) => { const m = /^([A-Z]+)(\d+)$/.exec(a1); let c = 0; for (const ch of m[1]) c = c * 26 + ch.charCodeAt(0) - 64; return { r: +m[2] - 1, c: c - 1 }; };
+const type = (a1, text) => { const { r, c } = ref(a1); A.select(r, c); A.editor.start('type', ''); A.editor.ta.value = text; A.editor.fb.value = text; return A.editor.commit('down'); };
+const val = (a1) => { const { r, c } = ref(a1); const v = S().getValue(r, c); return v && v.error ? v.error : v; };
+const text = (a1) => { const { r, c } = ref(a1); return A.fmt(S(), r, c).text; };
+const key = (k, opts = {}) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...opts }));
+const canvasMouse = (type, x, y, opts = {}) => { const rect = A.grid.canvas.getBoundingClientRect(); const ev = new MouseEvent(type, { clientX: rect.left + x, clientY: rect.top + y, bubbles: true, cancelable: true, button: 0, ...opts }); (type === 'mousemove' || type === 'mouseup' ? document : A.grid.canvas).dispatchEvent(ev); };
+const pixel = (x, y) => { const ctx = A.grid.ctx; const d = ctx.getImageData(Math.round(x * A.grid.dpr), Math.round(y * A.grid.dpr), 1, 1).data; return [d[0], d[1], d[2]]; };
+
+try {
+  await test('app booted with grid, menus and toolbar', async () => {
+    assert(A.wb && A.grid && A.editor, 'core objects');
+    assert(document.querySelectorAll('#menus .menu').length >= 6, 'menus');
+    assert(document.querySelectorAll('#toolbar .tb').length >= 30, 'toolbar buttons');
+    assert(Object.keys(A.commands).length >= 100, 'commands: ' + Object.keys(A.commands).length);
+    assert(A.modules.functions.size >= 300, 'functions');
+    await frame();
+    assert(A.grid.layout.rows.length > 10 && A.grid.layout.cols.length > 5, 'layout computed');
+  });
+
+  await test('typing values and formulas, recalculation and display', async () => {
+    type('A1', '10'); type('A2', '20'); type('A3', '=SUM(A1:A2)*2'); type('B1', '1,234.5'); type('B2', '50%'); type('B3', '2024-01-05'); type('B4', 'hello'); type('B5', 'TRUE');
+    eq(val('A3'), 60, 'formula'); eq(text('B1'), '1,234.50', 'thousands'); eq(val('B2'), 0.5); eq(text('B2'), '50%'); eq(text('B3'), '2024-01-05'); eq(val('B5'), true);
+    type('A1', '5'); eq(val('A3'), 50, 'recalc');
+    eq(S().view.active.r, 1, 'enter moved down');
+    await frame();
+    const rect = A.grid.cellRect(0, 0); assert(rect && rect.w > 0, 'cell rect');
+  });
+
+  await test('keyboard navigation and selection', async () => {
+    A.select(0, 0);
+    key('ArrowDown'); eq(S().view.active.r, 1); key('ArrowRight'); eq(S().view.active.c, 1);
+    key('ArrowDown', { shiftKey: true }); eq(S().view.ranges[0].r2, 2, 'shift extend');
+    key('Home'); eq(S().view.active.c, 0);
+    key('End', { ctrlKey: true }); assert(S().view.active.r >= 4, 'ctrl+end row ' + S().view.active.r);
+    key('Home', { ctrlKey: true }); eq(S().view.active.r, 0); eq(S().view.active.c, 0);
+    key('ArrowDown', { ctrlKey: true }); eq(S().view.active.r, 2, 'ctrl+down to edge of block');
+    key(' ', { ctrlKey: true }); eq(S().view.ranges[0].r2, 1048575, 'ctrl+space selects column');
+    A.select(0, 0); key('a', { ctrlKey: true }); const rg = S().view.ranges[0]; assert(rg.r2 >= 4 && rg.c2 >= 1, 'ctrl+a region ' + JSON.stringify(rg)); key('a', { ctrlKey: true }); eq(S().view.ranges[0].c2, 16383, 'ctrl+a twice selects all');
+    A.select(0, 0);
+  });
+
+  await test('typing a character starts editing; Escape cancels; F2 edits', async () => {
+    A.select(5, 0); key('x'); assert(A.editor.isEditing, 'editing'); eq(A.editor.ta.value, 'x'); key('Escape'); // document-level escape is ignored while editing; use editor key
+    A.editor.ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); assert(!A.editor.isEditing, 'cancelled'); eq(val('A6'), null);
+    key('F2'); assert(A.editor.isEditing); A.editor.cancel();
+  });
+
+  await test('formula autocomplete and reference picking', async () => {
+    A.select(6, 0); A.editor.start('type', '=su'); A.editor.onInput(A.editor.ta);
+    assert(A.editor.ac.style.display === 'block' && A.editor.acItems.includes('SUM'), 'autocomplete lists SUM');
+    A.editor.acIndex = A.editor.acItems.indexOf('SUM'); A.editor.acceptAutocomplete(); eq(A.editor.ta.value, '=SUM(');
+    assert(A.editor.canInsertRef(), 'can insert ref after (');
+    A.editor.insertRef({ r1: 0, c1: 0, r2: 1, c2: 0 }, false); eq(A.editor.ta.value, '=SUM(A1:A2');
+    assert(A.grid.refHighlights.length === 1, 'ref highlighted');
+    A.editor.ta.value += ')'; A.editor.onInput(A.editor.ta); A.editor.commit('down'); eq(val('A7'), 25);
+    // invalid formula is rejected (dialog shown)
+    A.select(7, 0); A.editor.start('type', '=SUM('); const ok = A.editor.commit('down'); eq(ok, false, 'invalid formula rejected'); assert(A.dialogOpen(), 'error dialog'); document.querySelector('.dialog .primary').click(); await sleep(10); A.editor.cancel();
+  });
+
+  await test('fill handle series and Ctrl+D', async () => {
+    type('D1', '1'); type('D2', '2');
+    A.autofill({ r1: 0, c1: 3, r2: 1, c2: 3 }, { r1: 0, c1: 3, r2: 5, c2: 3 }); eq(val('D6'), 6, 'linear series');
+    type('E1', 'Jan'); A.autofill({ r1: 0, c1: 4, r2: 0, c2: 4 }, { r1: 0, c1: 4, r2: 3, c2: 4 }); eq(val('E4'), 'Apr', 'month series');
+    type('F1', 'Item 1'); A.autofill({ r1: 0, c1: 5, r2: 0, c2: 5 }, { r1: 0, c1: 5, r2: 2, c2: 5 }); eq(val('F3'), 'Item 3');
+    type('G1', '=D1*10'); A.autofill({ r1: 0, c1: 6, r2: 0, c2: 6 }, { r1: 0, c1: 6, r2: 2, c2: 6 }); eq(S().getCell(2, 6).f, '=D3*10'); eq(val('G3'), 30);
+    type('H1', '2024-01-31'); A.autofill({ r1: 0, c1: 7, r2: 0, c2: 7 }, { r1: 0, c1: 7, r2: 2, c2: 7 }); eq(text('H3'), '2024-02-02', 'date day series');
+    A.selectRange({ r1: 0, c1: 6, r2: 4, c2: 6 }); key('d', { ctrlKey: true }); eq(S().getCell(4, 6).f, '=D5*10', 'ctrl+d');
+    // drag the fill handle with the mouse
+    type('I1', '9'); A.select(0, 8); await frame();
+    const fh = A.grid.fillHandleRect; assert(fh, 'fill handle rect');
+    const target = A.grid.cellRect(7, 8);
+    canvasMouse('mousedown', fh.x + fh.w / 2, fh.y + fh.h / 2); canvasMouse('mousemove', target.x + 5, target.y + 5); canvasMouse('mouseup', target.x + 5, target.y + 5);
+    eq(val('I8'), 9, 'mouse fill copies single value'); eq(S().view.ranges[0].r2, 7, 'fill selects target');
+  });
+
+  await test('copy, paste (internal + TSV + HTML), cut moves references', async () => {
+    A.selectRange({ r1: 0, c1: 3, r2: 1, c2: 3 }); A.clipboard.copy(false);
+    assert(A.grid.copyRange, 'marquee');
+    A.select(0, 9); await A.clipboard.paste(null); eq(val('J1'), 1); eq(val('J2'), 2);
+    // tile paste over a 4-row selection
+    A.selectRange({ r1: 0, c1: 10, r2: 3, c2: 10 }); await A.clipboard.paste(null); eq(val('K4'), 2, 'tiled');
+    // formulas shift on paste
+    A.selectRange({ r1: 0, c1: 6, r2: 0, c2: 6 }); A.clipboard.copy(false); A.select(0, 11); await A.clipboard.paste(null); eq(S().getCell(0, 11).f, '=I1*10', 'shifted');
+    // TSV from the system clipboard
+    const dt = new DataTransfer(); dt.setData('text/plain', 'x\ty\n1\t2\n'); const ev = new ClipboardEvent('paste', { clipboardData: dt });
+    A.clipboard.internal = null; A.select(10, 0); await A.clipboard.paste(ev); eq(val('A11'), 'x'); eq(val('B12'), 2);
+    // HTML table from another app
+    const dt2 = new DataTransfer(); dt2.setData('text/html', '<table><tr><td style="font-weight:bold;background:#ffff00">H</td><td>5%</td></tr><tr><td>$1,000</td><td>2024-03-01</td></tr></table>'); dt2.setData('text/plain', 'H\t5%\n$1,000\t2024-03-01');
+    A.select(13, 0); await A.clipboard.paste(new ClipboardEvent('paste', { clipboardData: dt2 }));
+    eq(val('A14'), 'H'); assert(S().getStyle(13, 0).bold && S().getStyle(13, 0).fill === '#ffff00', 'html styles'); eq(val('B14'), 0.05); eq(text('B14'), '5%'); eq(val('A15'), 1000); eq(text('B15'), '2024-03-01');
+    // paste values only
+    A.selectRange({ r1: 0, c1: 6, r2: 0, c2: 6 }); A.clipboard.copy(false); A.select(16, 0); await A.clipboard.paste(null, { mode: 'values' }); eq(S().getCell(16, 0).f, null); eq(val('A17'), 10);
+    // cut/paste moves and references follow
+    type('M1', '7'); type('M2', '=M1+1'); A.selectRange({ r1: 0, c1: 12, r2: 0, c2: 12 }); A.clipboard.copy(true); A.select(0, 13); await A.clipboard.paste(null);
+    eq(val('N1'), 7); eq(val('M1'), null); eq(S().getCell(1, 12).f, '=N1+1', 'reference followed the move'); eq(val('M2'), 8);
+    // transpose
+    A.selectRange({ r1: 0, c1: 3, r2: 2, c2: 3 }); A.clipboard.copy(false); A.select(19, 0); await A.clipboard.paste(null, { mode: 'transpose' }); eq(val('C20'), 3, 'transpose');
+  });
+
+  await test('undo / redo across edits and structure', async () => {
+    const before = val('A3');
+    type('A1', '100'); assert(val('A3') !== before);
+    A.run('edit.undo'); eq(val('A3'), before, 'undo edit');
+    A.run('edit.redo'); eq(val('A1'), 100, 'redo');
+    A.select(0, 0); A.run('insert.rowsAbove'); eq(val('A2'), 100, 'row inserted'); eq(S().getCell(3, 0).f, '=SUM(A2:A3)*2', 'formula adjusted');
+    A.run('edit.undo'); eq(val('A1'), 100, 'undo insert'); eq(S().getCell(2, 0).f, '=SUM(A1:A2)*2');
+    A.selectRange({ r1: 0, c1: 0, r2: 0, c2: 0 }); A.run('edit.deleteRows'); eq(val('A1'), 20); A.run('edit.undo'); eq(val('A1'), 100);
+  });
+
+  await test('formatting: toolbar toggles, number formats, borders, merge, dialogs', async () => {
+    A.select(0, 1); A.run('format.bold'); assert(S().getStyle(0, 1).bold, 'bold'); assert(A.commands['format.bold'].checked(), 'checked state');
+    A.run('format.bold'); assert(!S().getStyle(0, 1).bold, 'unbold');
+    A.run('format.percent'); eq(text('B1'), '123450%'); A.run('format.comma'); eq(text('B1'), '1,234.50');
+    A.run('format.decInc'); eq(text('B1'), '1,234.500'); A.run('format.decDec'); A.run('format.decDec'); eq(text('B1'), '1,234.5');
+    A.run('format.currency'); eq(text('B1'), '$1,234.50');
+    A.applyStyle({ fill: '#ff0000', color: '#ffffff', align: 'center' }); eq(S().getStyle(0, 1).fill, '#ff0000');
+    A.selectRange({ r1: 20, c1: 0, r2: 21, c2: 1 }); A.run('format.merge'); eq(S().merges.length, 1, 'merged'); A.run('format.merge'); eq(S().merges.length, 0, 'unmerged');
+    A.selectRange({ r1: 20, c1: 0, r2: 21, c2: 1 }); A.transact('b', () => A.applyBorderPreset(S().view.ranges[0], 'outline')); assert(S().getStyle(20, 0).border.top && S().getStyle(20, 0).border.left && !S().getStyle(20, 0).border.right, 'outline borders');
+    A.select(0, 1); A.dialogs.formatCells('font'); await sleep(20); assert(A.dialogOpen(), 'format dialog open'); const dlg = document.querySelector('.dialog'); assert(dlg.textContent.includes('Alignment') && dlg.textContent.includes('Sample'), 'tabs present');
+    dlg.querySelector('.dfoot button').click(); await sleep(10); assert(!A.dialogOpen(), 'cancelled');
+    A.setZoom(1.5); await frame(); assert(A.grid.layout.headerH > 25, 'zoomed header'); A.setZoom(1);
+    A.run('format.autofitCols'); assert(S().colWidth(1) >= 60, 'autofit');
+  });
+
+  await test('conditional formatting renders fills', async () => {
+    A.transact('cf', () => S().setCF([{ id: 'r1', r1: 0, c1: 3, r2: 7, c2: 3, type: 'cellIs', op: 'gt', v1: '3', style: { fill: '#00ff00' } }, { id: 'r2', r1: 0, c1: 4, r2: 3, c2: 4, type: 'containsText', v1: 'feb', style: { fill: '#0000ff', color: '#ffffff' } }]));
+    await frame();
+    const r = A.grid.cellRect(4, 3); const p = pixel(r.x + 2, r.y + 2); assert(p[1] > 200 && p[0] < 60, 'green fill for 5>3: ' + p);
+    const r2 = A.grid.cellRect(1, 4); const p2 = pixel(r2.x + 2, r2.y + 2); assert(p2[2] > 200 && p2[0] < 60, 'blue fill for Feb: ' + p2);
+    const r3 = A.grid.cellRect(1, 3); const p3 = pixel(r3.x + 2, r3.y + 2); assert(p3[0] > 240 && p3[1] > 240, 'no fill for 2: ' + p3);
+    A.transact('cf', () => S().setCF([{ id: 'cs', r1: 0, c1: 3, r2: 5, c2: 3, type: 'colorScale', colors: ['#ff0000', '#00ff00'] }]));
+    await frame(); const lo = pixel(A.grid.cellRect(0, 3).x + 2, A.grid.cellRect(0, 3).y + 2), hi = pixel(A.grid.cellRect(5, 3).x + 2, A.grid.cellRect(5, 3).y + 2); assert(lo[0] > 200 && hi[1] > 200, 'color scale ends ' + lo + ' / ' + hi);
+    A.transact('cf', () => S().setCF([]));
+  });
+
+  await test('sort and filter', async () => {
+    const wb = A.wb; A.addSheet(); const s = S();
+    const rows = [['Name', 'Qty'], ['pear', 3], ['apple', 1], ['fig', 2], ['apple', 5]];
+    A.transact('fill', () => rows.forEach((r, i) => r.forEach((v, j) => s.setInput(i, j, String(v)))));
+    A.select(1, 0); A.run('data.sortAsc'); eq(val('A2'), 'apple'); eq(val('A5'), 'pear'); eq(val('B5'), 3, 'row moved as unit');
+    A.run('data.sortDesc'); eq(val('A2'), 'pear');
+    A.select(0, 0); A.run('data.filter'); assert(s.filter, 'filter on'); await frame();
+    const fb = A.grid.filterButtonAt(A.grid.cellRect(0, 0).x + A.grid.cellRect(0, 0).w - 6, A.grid.cellRect(0, 0).y + 10); assert(fb, 'filter button hit');
+    A.transact('f', () => s.setFilter({ ...s.filter, conds: { 0: { values: ['apple'] } } })); eq(s.rowAxis.filtered.size, 2, 'two rows hidden'); assert(s.rowAxis.filtered.has(1), 'pear hidden');
+    type('D1', '=SUBTOTAL(109,B2:B5)'); eq(val('D1'), 6, 'subtotal of visible');
+    A.dialogs.filterPopover(0, { x: 10, y: 10, w: 20, h: 20 }); await sleep(10); const pop = document.querySelector('.popover'); assert(pop && pop.textContent.includes('apple') && pop.textContent.includes('Sort A'), 'filter popover'); pop.remove();
+    A.run('data.filter'); assert(!s.filter, 'filter off'); eq(s.rowAxis.filtered.size, 0);
+    A.selectRange({ r1: 0, c1: 0, r2: 4, c2: 1 }); A.run('data.sortAsc');
+    const n = A.removeDuplicates({ r1: 0, c1: 0, r2: 4, c2: 1 }, [0], true); eq(n, 1, 'duplicate removed'); eq(val('A4'), 'pear');
+    wb.transact('x', () => wb.removeSheet(s)); A.switchSheet(0);
+  });
+
+  await test('charts: create, render, data, hit regions, move', async () => {
+    const s = S();
+    A.transact('data', () => { [['Month', 'Sales', 'Cost'], ['Jan', 10, 4], ['Feb', 12, 5], ['Mar', 8, 3]].forEach((r, i) => r.forEach((v, j) => s.setInput(30 + i, 20 + j, String(v)))); });
+    const ch = A.modules.charts.newChart('column', `Sheet1!U31:W34`, { r: 30, c: 24 });
+    A.transact('chart', () => s.setCharts([...s.charts, ch]));
+    A.select(30, 20); await frame(); await frame();
+    const node = A.charts.nodes.get(ch.id); assert(node && node.el.style.display !== 'none', 'chart element visible');
+    const data = A.modules.charts.chartData(A.wb, ch); eq(data.series.length, 2, 'two series'); eq(data.series[0].name, 'Sales'); eq(data.categories.join(','), 'Jan,Feb,Mar');
+    assert(node.hits.length === 6, 'six bars: ' + node.hits.length);
+    const px = node.canvas.getContext('2d').getImageData(Math.round(node.hits[0].x + node.hits[0].w / 2) * A.grid.dpr, Math.round(node.hits[0].y + node.hits[0].h / 2) * A.grid.dpr, 1, 1).data; assert(px[2] > 150 && px[0] < 100, 'first series blue ' + [...px]);
+    for (const t of ['line', 'pie', 'bar', 'area', 'scatter', 'stackedColumn', 'doughnut']) { A.transact('t', () => s.updateChart(ch.id, { type: t })); await frame(); assert(A.charts.nodes.get(ch.id).hits.length > 0, 'renders ' + t); }
+    A.transact('t', () => s.updateChart(ch.id, { type: 'column' }));
+    type('V32', '20'); await frame(); const d2 = A.modules.charts.chartData(A.wb, ch); eq(d2.series[0].values[0], 20, 'chart follows data');
+    A.transact('mv', () => s.updateChart(ch.id, { anchor: { r: 31, c: 24, dx: 0, dy: 0 } })); await frame(); eq(A.charts.nodes.get(ch.id).el.style.top, A.grid.cellOrigin(31, 24).y + 'px', 'anchored');
+    A.charts.select(ch.id); key('Delete'); eq(s.charts.length, 0, 'deleted with Delete key');
+  });
+
+  await test('freeze panes, hidden rows, zoom hit testing', async () => {
+    const s = S(); A.select(2, 2); A.run('view.freezeSel'); eq(s.freeze.rows, 2); eq(s.freeze.cols, 2); await frame();
+    assert(A.grid.layout.frozenW > 0 && A.grid.layout.frozenH > 0, 'frozen layout');
+    A.grid.scrollBy(5, 0); await frame(); assert(A.grid.cellRect(0, 0), 'frozen row still visible'); assert(!A.grid.cellRect(3, 3), 'scrolled row hidden');
+    const hit = A.grid.cellAt(A.grid.layout.headerW + 5, A.grid.layout.headerH + 5); eq(hit.r, 0); eq(hit.c, 0);
+    A.run('view.unfreeze'); A.grid.scrollRow = 0; A.grid.scrollCol = 0;
+    A.selectRange({ r1: 1, c1: 0, r2: 1, c2: 16383 }); A.run('view.hideRows'); assert(s.rowAxis.hidden.has(1)); await frame(); assert(!A.grid.cellRect(1, 0), 'hidden row not laid out');
+    A.selectRange({ r1: 0, c1: 0, r2: 2, c2: 16383 }); A.run('view.unhideRows'); assert(!s.rowAxis.hidden.has(1));
+    A.select(0, 0);
+  });
+
+  await test('find / replace, go to, names', async () => {
+    type('P1', 'needle in P1'); type('P2', 'another needle');
+    A.select(0, 0); assert(A.findNext('needle', { matchCase: false }), 'found'); eq(S().view.active.c, 15);
+    eq(A.findAll('needle', {}).length, 2);
+    eq(A.replaceAll('needle', 'pin', {}), 2); eq(val('P1'), 'pin in P1');
+    A.goTo('P2'); eq(S().view.active.r, 1);
+    A.transact('n', () => A.wb.setName('Total', '=Sheet1!$A$3')); A.goTo('Total'); eq(S().view.active.r, 2);
+    type('Q1', '=Total/2'); eq(val('Q1'), val('A3') / 2);
+  });
+
+  await test('data validation list and rejection', async () => {
+    const s = S();
+    A.transact('dv', () => s.setValidations([{ id: 'v', r1: 40, c1: 0, r2: 40, c2: 0, type: 'list', v1: 'Yes,No', allowBlank: true, showDropdown: true, errorStyle: 'stop', error: 'Pick Yes or No' }, { id: 'w', r1: 41, c1: 0, r2: 41, c2: 0, type: 'whole', op: 'between', v1: '1', v2: '10' }]));
+    eq(A.validationListValues(s, s.validations[0]).join(','), 'Yes,No');
+    A.select(40, 0); A.editor.start('type', 'Maybe'); const ok = A.editor.commit('down'); eq(ok, false, 'rejected'); assert(A.dialogOpen()); document.querySelector('.dialog .primary').click(); await sleep(10); A.editor.cancel();
+    type('A41', 'Yes'); eq(val('A41'), 'Yes');
+    A.select(41, 0); A.editor.start('type', '12'); eq(A.editor.commit('down'), false); document.querySelector('.dialog .primary').click(); await sleep(10); A.editor.cancel();
+    type('A42', '7'); eq(val('A42'), 7);
+    A.select(40, 0); await frame(); assert(A.grid.dvButton, 'dropdown arrow drawn');
+    A.transact('dv', () => s.setValidations([]));
+  });
+
+  await test('sheet tabs: add, rename, switch, delete, cross-sheet formula', async () => {
+    const n0 = A.wb.sheets.length;
+    A.addSheet(); eq(A.wb.sheets.length, n0 + 1); eq(document.querySelectorAll('#tabs .tab').length, n0 + 1);
+    const s2 = S(); A.transact('rn', () => A.wb.renameSheet(s2, 'Data')); type('A1', '99');
+    A.switchSheet(0); type('R1', '=Data!A1+1'); eq(val('R1'), 100);
+    A.transact('rm', () => A.wb.removeSheet(A.wb.getSheet('Data'))); eq(val('R1'), '#REF!');
+    A.run('edit.undo'); eq(val('R1'), 100);
+    A.transact('rm', () => A.wb.removeSheet(A.wb.getSheet('Data')));
+  });
+
+  await test('xlsx round trip through the browser (export, import)', async () => {
+    const bytes = await A.modules.xlsx.exportXlsx(A.wb);
+    assert(bytes.length > 2000, 'xlsx bytes');
+    const wb2 = await A.modules.xlsx.importXlsx(bytes, 'rt.xlsx');
+    const t = wb2.sheets[0];
+    eq(t.getValue(2, 0), val('A3')); eq(t.getCell(2, 0).f, '=SUM(A1:A2)*2'); eq(t.getStyle(0, 1).fill, '#ff0000'); eq(t.getStyle(0, 1).numFmt, '$#,##0.00;[Red]-$#,##0.00');
+    assert(t.getStyle(20, 0).border && t.getStyle(20, 0).border.top, 'border exported');
+    // CSV export/import
+    const csv = A.modules.csv.toCSV([['a', 'b'], [1, 'x,y']]); const back = A.modules.csv.parseCSV(csv); eq(back[1][1], 'x,y');
+    // open a CSV file through the app
+    await A.openFile(new File(['name,score\nann,90\nbob,"8,5"\n'], 'scores.csv', { type: 'text/csv' }));
+    eq(A.wb.name, 'scores'); eq(val('B2'), 90); eq(val('B3'), '8,5'); eq(A.wb.sheets[0].name, 'scores');
+    // JSON round trip via openFile
+    const json = JSON.stringify(A.wb.toJSON());
+    await A.openFile(new File([json], 'book.json', { type: 'application/json' })); eq(val('A2'), 'ann');
+  });
+
+  await test('autosave to localStorage and restore', async () => {
+    A.newWorkbook(); type('A1', 'persist me'); A.autosave();
+    const j = JSON.parse(localStorage.getItem('officetable.autosave')); eq(j.sheets[0].cells[0][2], 'persist me');
+    A.newWorkbook(); eq(val('A1'), null); assert(A.restore(), 'restored'); eq(val('A1'), 'persist me');
+    localStorage.removeItem('officetable.autosave');
+  });
+
+  await test('large data performance: 20k cells + formulas render quickly', async () => {
+    A.newWorkbook(); const s = S();
+    const t0 = performance.now();
+    A.transact('bulk', () => { for (let r = 0; r < 2000; r++) for (let c = 0; c < 10; c++) s.setInput(r, c, c === 9 ? `=SUM(A${r + 1}:I${r + 1})` : String(r * c)); });
+    const t1 = performance.now();
+    assert(t1 - t0 < 6000, `bulk entry took ${(t1 - t0).toFixed(0)}ms`);
+    eq(val('J2000'), 1999 * (0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8));
+    type('A2000', '1000'); eq(val('J2000'), 1000 + 1999 * 36);
+    A.select(1999, 0); await frame(); assert(A.grid.cellRect(1999, 0), 'scrolled to row 2000');
+    const t2 = performance.now(); A.grid.render(); const t3 = performance.now(); assert(t3 - t2 < 200, `render ${(t3 - t2).toFixed(1)}ms`);
+    log(`  timing: bulk ${(t1 - t0).toFixed(0)}ms, render ${(t3 - t2).toFixed(1)}ms`);
+    A.newWorkbook();
+  });
+} catch (e) { errors++; lines.push('EXCEPTION ' + (e && e.stack || e)); }
+out.textContent = `SMOKE-RESULTS\n${lines.join('\n')}\nERRORS ${errors}`;
+</script>
+</body></html>

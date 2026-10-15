@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OfficeTable — browser spreadsheet</title>
+<meta name="description" content="Free, local, browser-based spreadsheet: formulas with 300+ functions, charts, sort and filter, conditional formatting, XLSX and CSV import/export.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%231d9a5b'/%3E%3Cpath d='M5 6h14v12H5z' fill='none' stroke='white' stroke-width='1.6'/%3E%3Cpath d='M5 10h14M5 14h14M10 6v12' stroke='white' stroke-width='1.4'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app">
+  <div id="menubar">
+    <span class="brand"><svg viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#1d9a5b"/><path d="M5 6h14v12H5z" fill="none" stroke="white" stroke-width="1.6"/><path d="M5 10h14M5 14h14M10 6v12" stroke="white" stroke-width="1.4"/></svg>Office<span>Table</span></span>
+    <div id="menus"></div>
+    <div class="filename"><input id="fileName" type="text" value="Book1" spellcheck="false" title="Workbook name"><span id="saveState"></span></div>
+  </div>
+  <div id="toolbar"></div>
+  <div id="formulabar">
+    <input id="nameBox" type="text" spellcheck="false" title="Name box: cell address or defined name">
+    <button id="fxBtn" title="Insert function">fx</button>
+    <input id="formulaInput" type="text" spellcheck="false" autocomplete="off">
+    <button id="fbCancel" class="fb-btn" title="Cancel (Esc)">✕</button>
+    <button id="fbEnter" class="fb-btn" title="Enter">✓</button>
+  </div>
+  <div id="gridwrap">
+    <canvas id="grid"></canvas>
+    <div id="overlay">
+      <textarea id="cellEditor" spellcheck="false" rows="1"></textarea>
+      <div id="autocomplete"></div>
+      <div id="fnTip"></div>
+    </div>
+    <div id="vscroll"><div></div></div>
+    <div id="hscroll"><div></div></div>
+    <div class="corner"></div>
+  </div>
+  <div id="sheetbar">
+    <div class="nav"><button id="tabPrev" title="Previous sheet">‹</button><button id="tabNext" title="Next sheet">›</button></div>
+    <div id="tabs"></div>
+    <button id="addSheet" title="New sheet (Shift+F11)">+</button>
+    <div class="right"><span id="calcInfo"></span></div>
+  </div>
+  <div id="statusbar">
+    <span id="statusMode">Ready</span>
+    <div class="stats" id="stats"></div>
+    <div class="zoom"><button id="zoomOut" title="Zoom out">−</button><input id="zoomRange" type="range" min="25" max="400" value="100"><button id="zoomIn" title="Zoom in">+</button><span id="zoomLabel" style="width:36px;text-align:right">100%</span></div>
+  </div>
+</div>
+<div id="contextMenu" class="dropdown"></div>
+<div id="modalBack"></div>
+<div id="toast"></div>
+<div id="dropOverlay">Drop a .xlsx, .csv, .tsv or .json workbook to open it</div>
+<input id="fileInput" type="file" accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json" class="hidden">
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
