@@ -11,5 +11,5 @@
     "test:smoke": "node test/run-smoke.mjs"
   },
   "license": "MIT",
-  "repository": "github:sypark-us/officetable"
+  "repository": "github:sypark-us/robbins_table"
 }
